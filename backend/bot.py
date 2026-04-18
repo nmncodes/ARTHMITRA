@@ -46,6 +46,8 @@ IS_RENDER = _env_flag("RENDER", "false")
 LOW_MEMORY_MODE = _env_flag("LOW_MEMORY_MODE", "true" if IS_RENDER else "false")
 ENABLE_RAG = _env_flag("ENABLE_RAG", "false" if LOW_MEMORY_MODE else "true")
 DEBUG_TOKEN_LOG = _env_flag("DEBUG_TOKEN_LOG", "false")
+OPENROUTER_MODEL = (os.getenv("OPENROUTER_MODEL", "openai/gpt-3.5-turbo") or "openai/gpt-3.5-turbo").strip()
+STRICT_LLM_ERRORS = _env_flag("STRICT_LLM_ERRORS", "false")
 
 
 class _TextResponse:
@@ -62,12 +64,12 @@ class LightweightLLM:
         self.allow_offline_llm = allow_offline_llm
         self.openrouter_fallback_models = _env_csv(
             "OPENROUTER_FALLBACK_MODELS",
-            "meta-llama/llama-3.1-8b-instruct:free,mistralai/mistral-7b-instruct:free",
+            "",
         )
 
         if openrouter_key:
             self.provider_name = "openrouter"
-            self.model_name = "openai/gpt-4o-mini"
+            self.model_name = OPENROUTER_MODEL
         elif gemini_key:
             self.provider_name = "gemini"
             self.model_name = "gemini-1.5-flash"
@@ -678,9 +680,9 @@ class ArthMitraBot:
         if openrouter_key:
             from langchain_openai import ChatOpenAI
 
-            print("🤖 Using OpenRouter AI (gpt-4o-mini)")
+            print(f"🤖 Using OpenRouter AI ({OPENROUTER_MODEL})")
             self.llm = ChatOpenAI(
-            model="openai/gpt-4o-mini",
+            model=OPENROUTER_MODEL,
             temperature=0.3,
             openai_api_key=openrouter_key,
             openai_api_base="https://openrouter.ai/api/v1",
@@ -1582,6 +1584,8 @@ If you have questions about current gold investment options in India or tax impl
                 answer_text = self._extract_text(response.content)
             except Exception as e:
                 print(f"⚠️ LLM invocation failed in no-doc mode: {e}")
+                if STRICT_LLM_ERRORS:
+                    raise RuntimeError(f"LLM invocation failed in no-doc mode: {e}") from e
                 answer_text = self._build_model_outage_message(metadata)
 
             response_text = self._append_sources_section(answer_text, sources)
@@ -1637,6 +1641,8 @@ If you have questions about current gold investment options in India or tax impl
             result = self._extract_text(response.content)
         except Exception as e:
             print(f"⚠️ LLM invocation failed, returning grounded fallback: {e}")
+            if STRICT_LLM_ERRORS:
+                raise RuntimeError(f"LLM invocation failed with retrieved context: {e}") from e
             result = self._build_model_outage_message(metadata)
         
         response_data = {
@@ -1695,6 +1701,8 @@ If you have questions about current gold investment options in India or tax impl
                             yield text
                 except Exception as e:
                     print(f"⚠️ Streaming failed in no-doc mode: {e}")
+                    if STRICT_LLM_ERRORS:
+                        raise RuntimeError(f"Streaming failed in no-doc mode: {e}") from e
                     yield self._build_model_outage_message(metadata)
 
             return no_doc_stream(), sources, metadata
@@ -1736,10 +1744,16 @@ If you have questions about current gold investment options in India or tax impl
         metadata["cached"] = False
 
         def doc_stream():
-            for chunk in self.llm.stream(prompt):
-                text = self._extract_text(chunk.content)
-                if text:
-                    yield text
+            try:
+                for chunk in self.llm.stream(prompt):
+                    text = self._extract_text(chunk.content)
+                    if text:
+                        yield text
+            except Exception as e:
+                print(f"⚠️ Streaming failed with retrieved context: {e}")
+                if STRICT_LLM_ERRORS:
+                    raise RuntimeError(f"Streaming failed with retrieved context: {e}") from e
+                yield self._build_model_outage_message(metadata)
 
         return doc_stream(), final_sources, metadata
     
@@ -1757,7 +1771,8 @@ If you have questions about current gold investment options in India or tax impl
         if self.llm:
             if hasattr(self.llm, "provider_name"):
                 if self.llm.provider_name == "openrouter":
-                    model_name = "OpenRouter (gpt-4o-mini)"
+                    openrouter_model = getattr(self.llm, "model_name", OPENROUTER_MODEL)
+                    model_name = f"OpenRouter ({openrouter_model})"
                 elif self.llm.provider_name == "gemini":
                     model_name = "Google Gemini (gemini-1.5-flash)"
                 elif self.llm.provider_name == "ollama":
@@ -1767,7 +1782,8 @@ If you have questions about current gold investment options in India or tax impl
             llm_module = self.llm.__class__.__module__
 
             if model_name is None and (llm_class_name == "ChatOpenAI" or "langchain_openai" in llm_module):
-                model_name = "OpenRouter (gpt-4o-mini)"
+                chatopenai_model = getattr(self.llm, "model_name", OPENROUTER_MODEL)
+                model_name = f"OpenRouter ({chatopenai_model})"
             elif model_name is None and (llm_class_name == "ChatGoogleGenerativeAI" or "langchain_google_genai" in llm_module):
                 model_name = "Google Gemini (gemini-1.5-flash)"
             elif model_name is None and (llm_class_name == "ChatOllama" or "langchain_ollama" in llm_module):
