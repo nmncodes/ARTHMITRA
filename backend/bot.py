@@ -4,30 +4,19 @@ Uses LangChain + OpenRouter + ChromaDB for document retrieval and response gener
 """
 
 import os
-import profile
 import re
 import glob
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple, List, Iterable, Any
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_chroma import Chroma
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader, CSVLoader, TextLoader, Docx2txtLoader
-from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from typing import Dict, Optional, Tuple, List, Iterable, Any, TYPE_CHECKING
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama
-from onnx_embeddings import OptimizedEmbeddings
 from cache import MultiLayerCache
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import json
-from functools import lru_cache
 import time
+
+if TYPE_CHECKING:
+    from langchain_core.documents import Document
 
 load_dotenv()
 
@@ -420,8 +409,6 @@ Recent chat: {chat_history}
 
 **Response:**"""
 
-PROMPT_TEMPLATE = ChatPromptTemplate.from_template(SYSTEM_PROMPT)
-
 
 class ArthMitraBot:
     """RAG-based financial assistant bot"""
@@ -471,6 +458,8 @@ class ArthMitraBot:
         
         # Initialize LLM
         if openrouter_key:
+            from langchain_openai import ChatOpenAI
+
             print("🤖 Using OpenRouter AI (gpt-4o-mini)")
             self.llm = ChatOpenAI(
             model="openai/gpt-4o-mini",
@@ -479,6 +468,8 @@ class ArthMitraBot:
             openai_api_base="https://openrouter.ai/api/v1",
             )
         elif gemini_key:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+
             print("🤖 Using Google Gemini AI (gemini-1.5-flash)")
             self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash",
@@ -487,6 +478,8 @@ class ArthMitraBot:
             convert_system_message_to_human=True,
             )
         else:
+            from langchain_ollama import ChatOllama
+
             # Offline fallback LLM
             print("🟡 No API keys found — using offline LLM (gemma3:1b)")
             self.llm = ChatOllama(
@@ -508,11 +501,15 @@ class ArthMitraBot:
         # Initialize ONNX-accelerated embeddings with built-in LRU cache
         # Falls back to standard HuggingFace if ONNX runtime not available
         if self.embeddings is None:
+            from onnx_embeddings import OptimizedEmbeddings
+
             print("🔄 Loading optimized embeddings model...")
             self.embeddings = OptimizedEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
         print("✅ Embeddings model loaded")
+
+        from langchain_chroma import Chroma
 
 
         # Load or create vector store
@@ -619,6 +616,12 @@ class ArthMitraBot:
             doc_count = 0
             
         if doc_count > 0:
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.output_parsers import StrOutputParser
+            from langchain_core.runnables import RunnablePassthrough
+
+            prompt_template = ChatPromptTemplate.from_template(SYSTEM_PROMPT)
+
             # Use MMR (Maximal Marginal Relevance) for better diversity with fewer docs
             # This retrieves fewer but more relevant documents = faster queries
             self._retriever = self.vectorstore.as_retriever(
@@ -632,7 +635,7 @@ class ArthMitraBot:
             
             self.rag_chain = (
                 {"context": self._retriever | self._format_docs, "question": RunnablePassthrough()}
-                | PROMPT_TEMPLATE
+                | prompt_template
                 | self.llm
                 | StrOutputParser()
             )
@@ -673,6 +676,8 @@ class ArthMitraBot:
             metadatas = results.get('metadatas', []) or []
 
             direct_matches = []
+            from langchain_core.documents import Document
+
             for content, metadata in zip(documents, metadatas):
                 if not metadata:
                     continue
@@ -701,6 +706,9 @@ class ArthMitraBot:
         
         # Determine loader based on file type
         file_ext = os.path.splitext(file_path)[1].lower()
+
+        from langchain_community.document_loaders import PyPDFLoader, CSVLoader, TextLoader, Docx2txtLoader
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
         
         if file_ext == ".pdf":
             loader = PyPDFLoader(file_path)
@@ -809,7 +817,7 @@ class ArthMitraBot:
             terms.append(word)
         return terms[:8]
 
-    def _build_source_highlights(self, source_docs: List[Document], query: str, max_items: int = 3) -> List[Dict[str, str]]:
+    def _build_source_highlights(self, source_docs: List["Document"], query: str, max_items: int = 3) -> List[Dict[str, str]]:
         terms = self._extract_query_terms(query)
         highlights: List[Dict[str, str]] = []
 
@@ -845,7 +853,7 @@ class ArthMitraBot:
 
         return highlights
 
-    def _calculate_confidence(self, source_docs: List[Document], query: str, source_filter: Optional[str] = None) -> Tuple[float, str]:
+    def _calculate_confidence(self, source_docs: List["Document"], query: str, source_filter: Optional[str] = None) -> Tuple[float, str]:
         if not source_docs:
             return 0.32, "low"
 
@@ -1025,7 +1033,7 @@ class ArthMitraBot:
         ranked.sort(key=lambda row: row["score"], reverse=True)
         return ranked[:max_items]
 
-    def _extract_document_insights(self, source_docs: List[Document], max_items: int = 6) -> List[Dict[str, str]]:
+    def _extract_document_insights(self, source_docs: List["Document"], max_items: int = 6) -> List[Dict[str, str]]:
         insights: List[Dict[str, str]] = []
         if not source_docs:
             return insights
@@ -1113,7 +1121,7 @@ class ArthMitraBot:
             "recommendedFit": f"{rec.get('name')} is currently the better fit for this profile/query.",
         }
 
-    def _build_why_this_answer(self, query: str, source_docs: List[Document], confidence: float, source_filter: Optional[str]) -> str:
+    def _build_why_this_answer(self, query: str, source_docs: List["Document"], confidence: float, source_filter: Optional[str]) -> str:
         source_count = len({os.path.basename(doc.metadata.get("source", "")) for doc in source_docs})
         chunk_count = len(source_docs)
         terms = self._extract_query_terms(query)[:4]
@@ -1186,7 +1194,7 @@ class ArthMitraBot:
         self,
         query: str,
         profile: Optional[Dict],
-        source_docs: List[Document],
+        source_docs: List["Document"],
         source_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
         confidence, confidence_label = self._calculate_confidence(source_docs, query, source_filter)
@@ -1521,11 +1529,14 @@ If you have questions about current gold investment options in India or tax impl
         # Determine which AI model is being used
         model_name = None
         if self.llm:
-            if isinstance(self.llm, ChatOpenAI):
+            llm_class_name = self.llm.__class__.__name__
+            llm_module = self.llm.__class__.__module__
+
+            if llm_class_name == "ChatOpenAI" or "langchain_openai" in llm_module:
                 model_name = "OpenRouter (gpt-4o-mini)"
-            elif isinstance(self.llm, ChatGoogleGenerativeAI):
+            elif llm_class_name == "ChatGoogleGenerativeAI" or "langchain_google_genai" in llm_module:
                 model_name = "Google Gemini (gemini-1.5-flash)"
-            elif isinstance(self.llm, ChatOllama):
+            elif llm_class_name == "ChatOllama" or "langchain_ollama" in llm_module:
                  model_name = "Ollama (gemma3:1b)"
         
         return {
