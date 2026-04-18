@@ -35,6 +35,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_csv(name: str, default: str = "") -> List[str]:
+    raw = os.getenv(name, default)
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 IS_RENDER = _env_flag("RENDER", "false")
 LOW_MEMORY_MODE = _env_flag("LOW_MEMORY_MODE", "true" if IS_RENDER else "false")
 ENABLE_RAG = _env_flag("ENABLE_RAG", "false" if LOW_MEMORY_MODE else "true")
@@ -53,6 +60,10 @@ class LightweightLLM:
         self.openrouter_key = openrouter_key
         self.gemini_key = gemini_key
         self.allow_offline_llm = allow_offline_llm
+        self.openrouter_fallback_models = _env_csv(
+            "OPENROUTER_FALLBACK_MODELS",
+            "meta-llama/llama-3.1-8b-instruct:free,mistralai/mistral-7b-instruct:free",
+        )
 
         if openrouter_key:
             self.provider_name = "openrouter"
@@ -103,7 +114,8 @@ class LightweightLLM:
             raw = resp.read().decode("utf-8", errors="replace")
         return json.loads(raw)
 
-    def _generate_openrouter(self, prompt: str) -> str:
+    def _generate_openrouter(self, prompt: str, model_name: Optional[str] = None) -> str:
+        model_to_use = model_name or self.model_name
         data = self._post_json(
             "https://openrouter.ai/api/v1/chat/completions",
             {
@@ -111,7 +123,7 @@ class LightweightLLM:
                 "Content-Type": "application/json",
             },
             {
-                "model": self.model_name,
+                "model": model_to_use,
                 "temperature": 0.3,
                 "messages": [{"role": "user", "content": prompt}],
             },
@@ -161,6 +173,21 @@ class LightweightLLM:
             try:
                 return self._generate_openrouter(prompt)
             except Exception as openrouter_error:
+                print(f"⚠️ OpenRouter primary model failed ({openrouter_error}).")
+
+                # Retry with optional free OpenRouter models before changing provider.
+                for fallback_model in self.openrouter_fallback_models:
+                    if fallback_model == self.model_name:
+                        continue
+                    try:
+                        print(f"🔁 Trying OpenRouter fallback model: {fallback_model}")
+                        text = self._generate_openrouter(prompt, model_name=fallback_model)
+                        if text:
+                            self.model_name = fallback_model
+                            return text
+                    except Exception as fallback_error:
+                        print(f"⚠️ OpenRouter fallback model failed ({fallback_model}): {fallback_error}")
+
                 if self.gemini_key:
                     print(f"⚠️ OpenRouter failed ({openrouter_error}). Falling back to Gemini...")
                     return self._generate_gemini(prompt)
@@ -577,6 +604,42 @@ class ArthMitraBot:
             sources = ["Knowledge Base"]
         sources_lines = "\n".join([f"- {source}" for source in sources])
         return f"{response}\n\n---\nSources:\n{sources_lines}"
+
+    def _build_model_outage_message(self, metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Return a useful fallback when cloud model calls fail."""
+        metadata = metadata or {}
+        lines = [
+            "I am facing a temporary model provider issue, but here is a quick plan based on your profile and query.",
+        ]
+
+        schemes = metadata.get("schemes") or []
+        if schemes:
+            lines.append("")
+            lines.append("Top options to consider right now:")
+            for idx, scheme in enumerate(schemes[:3], start=1):
+                name = scheme.get("name", "Option")
+                score = scheme.get("score", "-")
+                reason = scheme.get("reason", "General suitability based on available profile")
+                lines.append(f"{idx}. **{name}** ({score}/100): {reason}")
+
+        action_plan = metadata.get("actionPlan") or {}
+        steps = action_plan.get("steps") or []
+        if steps:
+            lines.append("")
+            lines.append("Recommended next steps:")
+            for step in steps[:3]:
+                lines.append(f"- {step}")
+
+        why_this_answer = metadata.get("whyThisAnswer")
+        if why_this_answer:
+            lines.append("")
+            lines.append(f"Why this snapshot: {why_this_answer}")
+
+        lines.append("")
+        lines.append(
+            "Please retry in 1-2 minutes. For stronger uptime, configure both OPENROUTER_API_KEY and GEMINI_API_KEY."
+        )
+        return "\n".join(lines)
     
     def clear_cache(self):
         """Clear all caches (response + embedding)"""
@@ -1519,7 +1582,7 @@ If you have questions about current gold investment options in India or tax impl
                 answer_text = self._extract_text(response.content)
             except Exception as e:
                 print(f"⚠️ LLM invocation failed in no-doc mode: {e}")
-                answer_text = "I am facing a temporary model issue. Please try again in a moment."
+                answer_text = self._build_model_outage_message(metadata)
 
             response_text = self._append_sources_section(answer_text, sources)
             return {
@@ -1574,7 +1637,7 @@ If you have questions about current gold investment options in India or tax impl
             result = self._extract_text(response.content)
         except Exception as e:
             print(f"⚠️ LLM invocation failed, returning grounded fallback: {e}")
-            result = "I am facing a temporary model issue. I am sharing grounded details from the retrieved documents instead."
+            result = self._build_model_outage_message(metadata)
         
         response_data = {
             "response": self._append_sources_section(result, final_sources),
@@ -1632,7 +1695,7 @@ If you have questions about current gold investment options in India or tax impl
                             yield text
                 except Exception as e:
                     print(f"⚠️ Streaming failed in no-doc mode: {e}")
-                    yield "I am facing a temporary model issue. Please try again in a moment."
+                    yield self._build_model_outage_message(metadata)
 
             return no_doc_stream(), sources, metadata
 
