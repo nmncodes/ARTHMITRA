@@ -6,7 +6,6 @@ Uses LangChain + OpenRouter + ChromaDB for document retrieval and response gener
 import os
 import re
 import glob
-import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List, Iterable, Any, TYPE_CHECKING
 from dotenv import load_dotenv
@@ -40,6 +39,135 @@ IS_RENDER = _env_flag("RENDER", "false")
 LOW_MEMORY_MODE = _env_flag("LOW_MEMORY_MODE", "true" if IS_RENDER else "false")
 ENABLE_RAG = _env_flag("ENABLE_RAG", "false" if LOW_MEMORY_MODE else "true")
 DEBUG_TOKEN_LOG = _env_flag("DEBUG_TOKEN_LOG", "false")
+
+
+class _TextResponse:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class LightweightLLM:
+    """Low-memory LLM client using direct HTTP calls (no LangChain runtime imports)."""
+
+    def __init__(self, gemini_key: Optional[str], openrouter_key: Optional[str], allow_offline_llm: bool):
+        self.gemini_key = gemini_key
+        self.openrouter_key = openrouter_key
+        self.allow_offline_llm = allow_offline_llm
+
+        if openrouter_key:
+            self.provider_name = "openrouter"
+            self.model_name = "openai/gpt-4o-mini"
+        elif gemini_key:
+            self.provider_name = "gemini"
+            self.model_name = "gemini-1.5-flash"
+        elif allow_offline_llm:
+            self.provider_name = "ollama"
+            self.model_name = "gemma3:1b"
+        else:
+            raise RuntimeError("No valid LLM provider configured")
+
+    def _coerce_prompt(self, payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload
+
+        if isinstance(payload, list):
+            lines = []
+            for item in payload:
+                role = "user"
+                content = ""
+
+                if isinstance(item, dict):
+                    role = str(item.get("role", "user"))
+                    content = str(item.get("content", ""))
+                else:
+                    content = str(getattr(item, "content", ""))
+                    cls_name = item.__class__.__name__.lower()
+                    if "system" in cls_name:
+                        role = "system"
+                    elif "human" in cls_name:
+                        role = "user"
+                    elif "ai" in cls_name:
+                        role = "assistant"
+
+                lines.append(f"{role.title()}: {content}")
+            return "\n".join(lines)
+
+        return str(payload)
+
+    def _post_json(self, url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
+        import urllib.request
+
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        return json.loads(raw)
+
+    def _generate(self, prompt: str) -> str:
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return ""
+
+        if self.provider_name == "openrouter":
+            data = self._post_json(
+                "https://openrouter.ai/api/v1/chat/completions",
+                {
+                    "Authorization": f"Bearer {self.openrouter_key}",
+                    "Content-Type": "application/json",
+                },
+                {
+                    "model": self.model_name,
+                    "temperature": 0.3,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            return (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+
+        if self.provider_name == "gemini":
+            data = self._post_json(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}",
+                {"Content-Type": "application/json"},
+                {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.3},
+                },
+            )
+
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ""
+            parts = candidates[0].get("content", {}).get("parts", [])
+            return "".join([str(p.get("text", "")) for p in parts if isinstance(p, dict)])
+
+        # Local Ollama fallback
+        data = self._post_json(
+            "http://localhost:11434/api/generate",
+            {"Content-Type": "application/json"},
+            {
+                "model": self.model_name,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.2},
+            },
+            timeout=120,
+        )
+        return str(data.get("response", ""))
+
+    def invoke(self, payload: Any) -> _TextResponse:
+        prompt = self._coerce_prompt(payload)
+        return _TextResponse(self._generate(prompt))
+
+    def stream(self, payload: Any) -> Iterable[_TextResponse]:
+        text = self.invoke(payload).content
+        if not text:
+            return
+        chunk_size = max(32, min(140, len(text) // 24 if len(text) > 24 else 32))
+        for idx in range(0, len(text), chunk_size):
+            yield _TextResponse(text[idx:idx + chunk_size])
 
 # Configuration
 CHROMA_PERSIST_DIR = "./chroma_db"
@@ -159,6 +287,8 @@ class GoldPriceLookup:
         """Load and parse the gold data CSV."""
         if os.path.exists(self.csv_path):
             try:
+                import pandas as pd
+
                 self.df = pd.read_csv(self.csv_path)
                 # Parse dates - format is DD/MM/YYYY
                 self.df['ParsedDate'] = pd.to_datetime(
@@ -455,6 +585,16 @@ class ArthMitraBot:
 
         if LOW_MEMORY_MODE:
             print("🪶 LOW_MEMORY_MODE enabled (memory-optimized runtime settings active)")
+
+        if LOW_MEMORY_MODE and not ENABLE_RAG:
+            print("🤖 Using low-memory HTTP LLM client")
+            self.llm = LightweightLLM(gemini_key, openrouter_key, allow_offline_llm)
+            self.embeddings = None
+            self.vectorstore = None
+            self.rag_chain = None
+            self._retriever = None
+            self._initialized = True
+            return self
         
         # Initialize LLM
         if openrouter_key:
@@ -1529,14 +1669,22 @@ If you have questions about current gold investment options in India or tax impl
         # Determine which AI model is being used
         model_name = None
         if self.llm:
+            if hasattr(self.llm, "provider_name"):
+                if self.llm.provider_name == "openrouter":
+                    model_name = "OpenRouter (gpt-4o-mini)"
+                elif self.llm.provider_name == "gemini":
+                    model_name = "Google Gemini (gemini-1.5-flash)"
+                elif self.llm.provider_name == "ollama":
+                    model_name = "Ollama (gemma3:1b)"
+
             llm_class_name = self.llm.__class__.__name__
             llm_module = self.llm.__class__.__module__
 
-            if llm_class_name == "ChatOpenAI" or "langchain_openai" in llm_module:
+            if model_name is None and (llm_class_name == "ChatOpenAI" or "langchain_openai" in llm_module):
                 model_name = "OpenRouter (gpt-4o-mini)"
-            elif llm_class_name == "ChatGoogleGenerativeAI" or "langchain_google_genai" in llm_module:
+            elif model_name is None and (llm_class_name == "ChatGoogleGenerativeAI" or "langchain_google_genai" in llm_module):
                 model_name = "Google Gemini (gemini-1.5-flash)"
-            elif llm_class_name == "ChatOllama" or "langchain_ollama" in llm_module:
+            elif model_name is None and (llm_class_name == "ChatOllama" or "langchain_ollama" in llm_module):
                  model_name = "Ollama (gemma3:1b)"
         
         return {
