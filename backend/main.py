@@ -193,19 +193,19 @@ async def lifespan(app: FastAPI):
     from dotenv import load_dotenv
     load_dotenv()
     
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     allow_offline_llm = os.getenv("ALLOW_OFFLINE_LLM", "false").lower() == "true"
     
-    if gemini_key:
-        print("✅ Gemini API key found")
-    elif openrouter_key:
+    if openrouter_key:
         print("✅ OpenRouter API key found")
+    elif gemini_key:
+        print("✅ Gemini API key found")
     elif allow_offline_llm:
         print("⚠️ No cloud API key configured; ALLOW_OFFLINE_LLM=true, using local Ollama fallback")
     else:
         raise RuntimeError(
-            "No cloud LLM key configured. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or OPENROUTER_API_KEY. "
+            "No cloud LLM key configured. Set OPENROUTER_API_KEY or GEMINI_API_KEY (or GOOGLE_API_KEY). "
             "If you want local Ollama fallback, set ALLOW_OFFLINE_LLM=true."
         )
     
@@ -1538,26 +1538,34 @@ def voice_assistant(request: AssistantRequest, db: Session = Depends(get_db)):
         )
 
 
-# ── OpenAI Text-to-Speech endpoint ──────────────────────────────
+# ── OpenRouter Text-to-Speech endpoint ─────────────────────────
 class TTSRequest(BaseModel):
     text: str
 
 @app.post("/api/tts")
 def text_to_speech(request: TTSRequest):
-    """Convert text to speech using OpenAI TTS. Returns streaming audio/mpeg."""
+    """Convert text to speech using OpenRouter-compatible TTS. Returns streaming audio/mpeg."""
     from openai import OpenAI
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+    if not openrouter_key:
+        if gemini_key:
+            raise HTTPException(
+                status_code=501,
+                detail="/api/tts currently requires OPENROUTER_API_KEY. Gemini/Google key is supported for chat endpoints.",
+            )
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY is not configured")
 
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Text must not be empty")
 
     try:
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=openrouter_key, base_url="https://openrouter.ai/api/v1")
+        tts_model = os.getenv("OPENROUTER_TTS_MODEL", "openai/gpt-4o-mini-tts")
         response = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
+            model=tts_model,
             voice="alloy",
             input=request.text,
             response_format="mp3",

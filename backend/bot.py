@@ -49,9 +49,9 @@ class _TextResponse:
 class LightweightLLM:
     """Low-memory LLM client using direct HTTP calls (no LangChain runtime imports)."""
 
-    def __init__(self, gemini_key: Optional[str], openrouter_key: Optional[str], allow_offline_llm: bool):
-        self.gemini_key = gemini_key
+    def __init__(self, openrouter_key: Optional[str], gemini_key: Optional[str], allow_offline_llm: bool):
         self.openrouter_key = openrouter_key
+        self.gemini_key = gemini_key
         self.allow_offline_llm = allow_offline_llm
 
         if openrouter_key:
@@ -572,14 +572,14 @@ class ArthMitraBot:
     
     def initialize(self, auto_index: bool = True):
         """Initialize the bot with embeddings and LLM"""
-        # Check for Gemini API key first (preferred), then OpenRouter
-        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        # Prefer OpenRouter key first, then Gemini/Google key.
         openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         allow_offline_llm = os.getenv("ALLOW_OFFLINE_LLM", "false").lower() == "true"
         
-        if not gemini_key and not openrouter_key and not allow_offline_llm:
+        if not openrouter_key and not gemini_key and not allow_offline_llm:
             raise RuntimeError(
-                "No cloud LLM key configured. Set GEMINI_API_KEY (or GOOGLE_API_KEY) or OPENROUTER_API_KEY. "
+                "No cloud LLM key configured. Set OPENROUTER_API_KEY or GEMINI_API_KEY (or GOOGLE_API_KEY). "
                 "If you want local Ollama fallback, set ALLOW_OFFLINE_LLM=true."
             )
 
@@ -588,7 +588,7 @@ class ArthMitraBot:
 
         if LOW_MEMORY_MODE and not ENABLE_RAG:
             print("🤖 Using low-memory HTTP LLM client")
-            self.llm = LightweightLLM(gemini_key, openrouter_key, allow_offline_llm)
+            self.llm = LightweightLLM(openrouter_key, gemini_key, allow_offline_llm)
             self.embeddings = None
             self.vectorstore = None
             self.rag_chain = None
