@@ -12,6 +12,7 @@ import RiskComparison from '@/components/RiskComparison';
 
 // Colors for the Pie Chart
 const COLORS = ['#2563eb', '#f59e0b', '#10b981', '#8b5cf6', '#ef4444'];
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export default function GoalPlanner() {
   const router = useRouter();
@@ -27,7 +28,7 @@ export default function GoalPlanner() {
     try {
       // Temporarily simulating the NEW backend response structure for testing the UI
       // In production, you will fetch this from your Python backend
-      const response = await fetch('http://localhost:8000/api/finance/check-goal', {
+            const response = await fetch(`${API_BASE_URL}/api/finance/check-goal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ goal_type: sector, amount: target, years: years, risk_profile: risk }),
