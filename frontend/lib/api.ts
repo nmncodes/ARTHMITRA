@@ -374,6 +374,7 @@ export async function sendMessageStream(
   sessionId?: string,
   sourceFilter?: string
 ): Promise<void> {
+  let streamResponseOk = false;
   try {
     const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
       method: 'POST',
@@ -389,6 +390,8 @@ export async function sendMessageStream(
         sourceFilter,
       }),
     });
+
+    streamResponseOk = response.ok;
 
     if (!response.ok || !response.body) {
       throw new Error(`Streaming failed with status ${response.status}`);
@@ -422,19 +425,49 @@ export async function sendMessageStream(
         if (!data) continue;
 
         if (event === 'token') {
-          onToken(JSON.parse(data));
+          try {
+            const parsed = JSON.parse(data);
+            onToken(typeof parsed === 'string' ? parsed : String(parsed ?? ''));
+          } catch {
+            // Be permissive to avoid dropping the whole stream on a single malformed chunk.
+            onToken(data);
+          }
         } else if (event === 'sources') {
-          onSources(JSON.parse(data));
+          try {
+            const parsed = JSON.parse(data);
+            onSources(Array.isArray(parsed) ? parsed : []);
+          } catch {
+            onSources([]);
+          }
         } else if (event === 'meta') {
-          onMeta?.(JSON.parse(data));
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed && typeof parsed === 'object') {
+              onMeta?.(parsed);
+            }
+          } catch {
+            // Ignore malformed metadata packets and keep token streaming alive.
+          }
         } else if (event === 'error') {
-          throw new Error(JSON.parse(data));
+          let message = data;
+          try {
+            message = JSON.parse(data);
+          } catch {
+            // Keep raw payload if not JSON.
+          }
+          throw new Error(String(message));
         } else if (event === 'done') {
           return;
         }
       }
     }
   } catch (error) {
+    // If stream endpoint accepted the request, do not also call /api/chat.
+    // This avoids duplicate requests and backend 500s from fallback path.
+    if (streamResponseOk) {
+      throw error;
+    }
+
     const fallback = await sendMessage(message, profile, history, userId, sessionId, sourceFilter);
     onToken(fallback.response);
     onSources(fallback.sources || []);
