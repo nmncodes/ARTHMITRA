@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 import json
 import time
 
-from bot import initialize_bot, get_bot
 from database import get_db, init_db
 from sqlalchemy.orm import Session
 import crud
@@ -24,8 +23,15 @@ def _auto_index_documents_enabled() -> bool:
     return _env_flag("AUTO_INDEX_DOCUMENTS", "false")
 
 
+def _get_bot_instance():
+    # Lazy import avoids loading heavy AI/RAG dependencies during API startup.
+    from bot import get_bot
+
+    return get_bot()
+
+
 def _ensure_bot_initialized():
-    bot = get_bot()
+    bot = _get_bot_instance()
     if not bot._initialized:
         auto_index = _auto_index_documents_enabled()
         print(f"🔄 Initializing bot (auto_index={auto_index})...")
@@ -212,7 +218,7 @@ async def lifespan(app: FastAPI):
         auto_index = _auto_index_documents_enabled()
         print(f"🔄 Preloading bot on startup (auto_index={auto_index})...")
         try:
-            bot = get_bot()
+            bot = _get_bot_instance()
             bot.initialize(auto_index=auto_index)
             print("✅ Bot initialized successfully")
 
@@ -251,7 +257,6 @@ app.add_middleware(
 UPLOAD_DIR = "./uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-from langchain_core.messages import HumanMessage
 import re
 
 @app.post("/api/finance/check-goal")
@@ -260,6 +265,8 @@ async def check_goal_inflation(data: dict):
     Upgraded Endpoint: Calculates math in Python, retrieves real funds via RAG, 
     and uses the LLM to generate specific Indian scheme allocations.
     """
+    from langchain_core.messages import HumanMessage
+
     goal_type = data.get("goal_type", "General")
     amount = float(data.get("amount", 0))
     years = int(data.get("years", 1))
@@ -584,7 +591,7 @@ def chat_stream(request: ChatRequest):
 async def upload_document(file: UploadFile = File(...), user_id: Optional[str] = Form(None), db: Session = Depends(get_db)):
     """Upload and index a document (PDF, CSV, TXT, MD, DOCX)"""
     try:
-        bot = get_bot()
+        bot = _get_bot_instance()
         if not bot._initialized:
             # Initialize bot quickly on first upload (skip full auto-index scan)
             bot.initialize(auto_index=False)
@@ -649,7 +656,7 @@ async def upload_document(file: UploadFile = File(...), user_id: Optional[str] =
 def get_status():
     """Get bot status and statistics"""
     try:
-        bot = get_bot()
+        bot = _get_bot_instance()
         status = bot.get_status()
         return StatusResponse(**status)
     except Exception as e:
@@ -664,7 +671,7 @@ def get_status():
 def clear_cache():
     """Clear the response cache for fresh responses"""
     try:
-        bot = get_bot()
+        bot = _get_bot_instance()
         if bot._initialized:
             bot.clear_cache()
             return {"status": "success", "message": "Cache cleared successfully"}
@@ -943,7 +950,7 @@ def delete_document(document_id: str, db: Session = Depends(get_db)):
 
         # 1. Remove chunks from the vector store
         try:
-            bot = get_bot()
+            bot = _get_bot_instance()
             if bot._initialized:
                 bot.remove_document(filename)
         except Exception as e:
