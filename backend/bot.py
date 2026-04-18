@@ -469,15 +469,6 @@ class ArthMitraBot:
         if LOW_MEMORY_MODE:
             print("🪶 LOW_MEMORY_MODE enabled (memory-optimized runtime settings active)")
         
-        # Initialize ONNX-accelerated embeddings with built-in LRU cache
-        # Falls back to standard HuggingFace if ONNX runtime not available
-        if self.embeddings is None:
-            print("🔄 Loading optimized embeddings model...")
-            self.embeddings = OptimizedEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
-        print("✅ Embeddings model loaded")
-        
         # Initialize LLM
         if openrouter_key:
             print("🤖 Using OpenRouter AI (gpt-4o-mini)")
@@ -513,6 +504,15 @@ class ArthMitraBot:
             self._retriever = None
             self._initialized = True
             return self
+
+        # Initialize ONNX-accelerated embeddings with built-in LRU cache
+        # Falls back to standard HuggingFace if ONNX runtime not available
+        if self.embeddings is None:
+            print("🔄 Loading optimized embeddings model...")
+            self.embeddings = OptimizedEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+        print("✅ Embeddings model loaded")
 
 
         # Load or create vector store

@@ -470,6 +470,11 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/health")
+def api_health():
+    return {"status": "ok"}
+
+
 
 @app.get("/api/hello")
 def hello():
@@ -654,9 +659,25 @@ async def upload_document(file: UploadFile = File(...), user_id: Optional[str] =
 
 @app.get("/api/status", response_model=StatusResponse)
 def get_status():
-    """Get bot status and statistics"""
+    """Get bot status without forcing heavy AI imports."""
     try:
-        bot = _get_bot_instance()
+        bot_module = sys.modules.get("bot")
+        if bot_module is None:
+            return StatusResponse(
+                initialized=False,
+                documents_indexed=0,
+                model=None
+            )
+
+        get_bot_fn = getattr(bot_module, "get_bot", None)
+        if not callable(get_bot_fn):
+            return StatusResponse(
+                initialized=False,
+                documents_indexed=0,
+                model=None
+            )
+
+        bot = get_bot_fn()
         status = bot.get_status()
         return StatusResponse(**status)
     except Exception as e:
