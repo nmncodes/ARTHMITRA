@@ -103,47 +103,42 @@ class LightweightLLM:
             raw = resp.read().decode("utf-8", errors="replace")
         return json.loads(raw)
 
-    def _generate(self, prompt: str) -> str:
-        prompt = (prompt or "").strip()
-        if not prompt:
+    def _generate_openrouter(self, prompt: str) -> str:
+        data = self._post_json(
+            "https://openrouter.ai/api/v1/chat/completions",
+            {
+                "Authorization": f"Bearer {self.openrouter_key}",
+                "Content-Type": "application/json",
+            },
+            {
+                "model": self.model_name,
+                "temperature": 0.3,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+        return (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+
+    def _generate_gemini(self, prompt: str) -> str:
+        data = self._post_json(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_key}",
+            {"Content-Type": "application/json"},
+            {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.3},
+            },
+        )
+
+        candidates = data.get("candidates", [])
+        if not candidates:
             return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        return "".join([str(p.get("text", "")) for p in parts if isinstance(p, dict)])
 
-        if self.provider_name == "openrouter":
-            data = self._post_json(
-                "https://openrouter.ai/api/v1/chat/completions",
-                {
-                    "Authorization": f"Bearer {self.openrouter_key}",
-                    "Content-Type": "application/json",
-                },
-                {
-                    "model": self.model_name,
-                    "temperature": 0.3,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            return (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
-
-        if self.provider_name == "gemini":
-            data = self._post_json(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}",
-                {"Content-Type": "application/json"},
-                {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.3},
-                },
-            )
-
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return ""
-            parts = candidates[0].get("content", {}).get("parts", [])
-            return "".join([str(p.get("text", "")) for p in parts if isinstance(p, dict)])
-
-        # Local Ollama fallback
+    def _generate_ollama(self, prompt: str) -> str:
         data = self._post_json(
             "http://localhost:11434/api/generate",
             {"Content-Type": "application/json"},
@@ -156,6 +151,26 @@ class LightweightLLM:
             timeout=120,
         )
         return str(data.get("response", ""))
+
+    def _generate(self, prompt: str) -> str:
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return ""
+
+        if self.provider_name == "openrouter":
+            try:
+                return self._generate_openrouter(prompt)
+            except Exception as openrouter_error:
+                if self.gemini_key:
+                    print(f"⚠️ OpenRouter failed ({openrouter_error}). Falling back to Gemini...")
+                    return self._generate_gemini(prompt)
+                raise
+
+        if self.provider_name == "gemini":
+            return self._generate_gemini(prompt)
+
+        # Local Ollama fallback
+        return self._generate_ollama(prompt)
 
     def invoke(self, payload: Any) -> _TextResponse:
         prompt = self._coerce_prompt(payload)
@@ -1496,13 +1511,17 @@ If you have questions about current gold investment options in India or tax impl
         # If no documents indexed, use direct LLM response
         if self.rag_chain is None or doc_count == 0:
             prompt = SYSTEM_PROMPT.replace("{user_profile}", user_profile_text).replace("{chat_history}", chat_history_text).replace("{context}", "No specific documents available.").replace("{question}", query)
-            response = self.llm.invoke(prompt)
             sources = ["General Knowledge - No documents indexed yet"]
             metadata = self._build_response_metadata(query, profile, [], source_filter)
-            response_text = self._append_sources_section(
-                self._extract_text(response.content),
-                sources
-            )
+
+            try:
+                response = self.llm.invoke(prompt)
+                answer_text = self._extract_text(response.content)
+            except Exception as e:
+                print(f"⚠️ LLM invocation failed in no-doc mode: {e}")
+                answer_text = "I am facing a temporary model issue. Please try again in a moment."
+
+            response_text = self._append_sources_section(answer_text, sources)
             return {
                 "response": response_text,
                 "sources": sources,
@@ -1606,10 +1625,14 @@ If you have questions about current gold investment options in India or tax impl
             metadata["cached"] = False
 
             def no_doc_stream():
-                for chunk in self.llm.stream(prompt):
-                    text = self._extract_text(chunk.content)
-                    if text:
-                        yield text
+                try:
+                    for chunk in self.llm.stream(prompt):
+                        text = self._extract_text(chunk.content)
+                        if text:
+                            yield text
+                except Exception as e:
+                    print(f"⚠️ Streaming failed in no-doc mode: {e}")
+                    yield "I am facing a temporary model issue. Please try again in a moment."
 
             return no_doc_stream(), sources, metadata
 
